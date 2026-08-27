@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import re
+import random
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, StateFilter
@@ -36,7 +37,8 @@ def load_data():
             "cities": [],
             "orders": [],
             "next_product_id": 1,
-            "next_order_id": 1
+            "next_order_id": 1,
+            "next_user_internal_id": 1
         }
     with open(DATA_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
@@ -52,10 +54,15 @@ def get_user(user_id):
     uid = str(user_id)
     if uid not in data["users"]:
         data["users"][uid] = {
-            "balance": 0,
+            "internal_id": data["next_user_internal_id"],
+            "balance_kzt": 0,
+            "balance_usdt": 0.0,
+            "balance_btc": 0.0,
+            "balance_ltc": 0.0,
             "orders": [],
             "joined": datetime.now().isoformat()
         }
+        data["next_user_internal_id"] += 1
         save_data(data)
     return data["users"][uid]
 
@@ -80,12 +87,14 @@ class AdminStates(StatesGroup):
     del_city_select = State()
     bal_user = State()
     bal_amount = State()
+    bal_currency = State()   # новая валюта
     broadcast_text = State()
 
 # ========== КЛАВИАТУРЫ ==========
 def main_menu():
     kb = [
         [KeyboardButton(text="📦 Прайс")],
+        [KeyboardButton(text="👤 Профиль")],
         [KeyboardButton(text="❓ Помощь")],
         [KeyboardButton(text="💼 Работа")]
     ]
@@ -132,9 +141,14 @@ def payment_keyboard():
 # ========== ОБРАБОТЧИКИ ==========
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    get_user(message.from_user.id)
+    user = get_user(message.from_user.id)
     await message.answer(
         f"✨ Добро пожаловать в <b>{STORE_NAME}</b>!\n\n"
+        f"💰 <b>Ваш баланс:</b>\n"
+        f"KZT: {user['balance_kzt']}\n"
+        f"USDT: {user['balance_usdt']:.2f}\n"
+        f"BTC: {user['balance_btc']:.6f}\n"
+        f"LTC: {user['balance_ltc']:.4f}\n\n"
         "Доступные товары можно посмотреть в разделе 📦 Прайс.\n"
         "По всем вопросам обращайтесь в поддержку.",
         parse_mode="HTML",
@@ -151,6 +165,21 @@ async def price_handler(message: types.Message):
         "🏙 <b>Выберите город для просмотра товаров:</b>",
         parse_mode="HTML",
         reply_markup=cities_keyboard()
+    )
+
+@dp.message(F.text == "👤 Профиль")
+async def profile_handler(message: types.Message):
+    user = get_user(message.from_user.id)
+    username = message.from_user.username or "Не указан"
+    tg_id = message.from_user.id
+    internal_id = user["internal_id"]
+    await message.answer(
+        f"👤 <b>Ваш профиль</b>\n\n"
+        f"👤 Юзернейм: @{username}\n"
+        f"🆔 Telegram ID: <code>{tg_id}</code>\n"
+        f"🔢 Внутренний ID: <code>{internal_id}</code>",
+        parse_mode="HTML",
+        reply_markup=main_menu()
     )
 
 @dp.message(F.text == "❓ Помощь")
@@ -185,35 +214,24 @@ async def city_selected(message: types.Message):
 @dp.message(lambda msg: msg.text and " - " in msg.text and any(p["name"] in msg.text for p in data["products"]))
 async def product_selected(message: types.Message, state: FSMContext):
     product_text = message.text.split(" - ")[0].strip()
+    # Убираем вес в скобках
     product_name = re.sub(r'\s*\([^)]*\)', '', product_text).strip()
+    # Ищем товар (сравниваем только по названию, без учёта веса)
     product = next((p for p in data["products"] if p["name"] == product_name), None)
     if not product:
-        await message.answer("❌ Товар не найден.")
+        await message.answer("❌ Товар не найден. Попробуйте ещё раз.")
         return
-    await state.update_data(product=product)
+    # Генерируем случайный ID заказа
+    order_id = random.randint(100000, 999999)
+    # Отправляем сообщение с деталями
     await message.answer(
-        f"✅ <b>Вы выбрали:</b>\n"
-        f"📦 {product['name']}\n"
-        f"⚖️ Вес: {product['weight']}\n"
-        f"💰 Цена: {product['price']} KZT\n\n"
-        f"Выберите способ оплаты:",
-        parse_mode="HTML",
-        reply_markup=payment_keyboard()
-    )
-    await state.set_state(PaymentState.waiting)
-
-@dp.message(StateFilter(PaymentState.waiting), F.text == "🔙 Назад")
-async def back_from_payment(message: types.Message, state: FSMContext):
-    await state.clear()
-    await message.answer("🔙 Возврат к выбору города.", reply_markup=cities_keyboard())
-
-@dp.message(StateFilter(PaymentState.waiting), F.text.in_(["USDT", "LITECOIN", "Перевод на карту РК"]))
-async def payment_chosen(message: types.Message, state: FSMContext):
-    await state.clear()
-    await message.answer(
-        f"⚠️ <b>Внимание!</b>\n\n"
-        f"На данный момент автоматическая оплата отключена.\n"
-        f"Обратитесь в поддержку: {SUPPORT}",
+        f"🆕 <b>Заказ #{order_id}</b>\n\n"
+        f"📦 <b>Товар:</b> {product['name']}\n"
+        f"⚖️ <b>Вес:</b> {product['weight']}\n"
+        f"🏙 <b>Город:</b> {product['city']}\n"
+        f"💰 <b>Цена:</b> {product['price']} KZT\n\n"
+        f"⚠️ На данный момент автоматическая система оплаты через бота отключена.\n"
+        f"📩 Перешлите это сообщение оператору: {SUPPORT}",
         parse_mode="HTML",
         reply_markup=main_menu()
     )
@@ -246,12 +264,12 @@ async def back_to_admin(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("⚙️ Панель администратора", reply_markup=admin_menu())
 
-# ---------- Добавление товара ----------
+# ---------- Добавление товара (исправлен поиск) ----------
 @dp.message(F.text == "➕ Добавить товар")
 async def add_product_start(message: types.Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
-    await message.answer("Введите <b>название</b> товара:", parse_mode="HTML", reply_markup=back_to_admin_kb())
+    await message.answer("Введите <b>название</b> товара (без веса):", parse_mode="HTML", reply_markup=back_to_admin_kb())
     await state.set_state(AdminStates.add_name)
 
 @dp.message(AdminStates.add_name)
@@ -260,7 +278,7 @@ async def add_product_name(message: types.Message, state: FSMContext):
         await state.clear()
         await back_to_admin(message, state)
         return
-    await state.update_data(name=message.text)
+    await state.update_data(name=message.text.strip())
     await message.answer("Введите <b>цену</b> (в KZT):", parse_mode="HTML")
     await state.set_state(AdminStates.add_price)
 
@@ -286,7 +304,7 @@ async def add_product_weight(message: types.Message, state: FSMContext):
         await state.clear()
         await back_to_admin(message, state)
         return
-    await state.update_data(weight=message.text)
+    await state.update_data(weight=message.text.strip())
     if not data["cities"]:
         await message.answer("❌ Сначала добавьте хотя бы один город через '🏙 Добавить город'.")
         await state.clear()
@@ -322,7 +340,7 @@ async def add_product_city(message: types.Message, state: FSMContext):
     except:
         await message.answer(f"❌ Введите число от 1 до {len(data['cities'])}")
 
-# ---------- Редактирование товара ----------
+# ---------- Остальные админ-команды (без изменений) ----------
 @dp.message(F.text == "✏️ Редактировать товар")
 async def edit_product_start(message: types.Message, state: FSMContext):
     if not is_admin(message.from_user.id):
@@ -406,7 +424,6 @@ async def edit_product_value(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer(f"✅ Товар обновлён: {field} → {value}", reply_markup=admin_menu())
 
-# ---------- Удаление товара ----------
 @dp.message(F.text == "🗑 Удалить товар")
 async def delete_product_start(message: types.Message, state: FSMContext):
     if not is_admin(message.from_user.id):
@@ -441,7 +458,6 @@ async def delete_product_confirm(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer(f"✅ Товар <b>{product['name']}</b> удалён.", parse_mode="HTML", reply_markup=admin_menu())
 
-# ---------- Добавление города ----------
 @dp.message(F.text == "🏙 Добавить город")
 async def add_city_start(message: types.Message, state: FSMContext):
     if not is_admin(message.from_user.id):
@@ -467,7 +483,6 @@ async def add_city_name(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer(f"✅ Город <b>{city}</b> добавлен.", parse_mode="HTML", reply_markup=admin_menu())
 
-# ---------- Удаление города ----------
 @dp.message(F.text == "🗑 Удалить город")
 async def remove_city_start(message: types.Message, state: FSMContext):
     if not is_admin(message.from_user.id):
@@ -501,12 +516,42 @@ async def remove_city_name(message: types.Message, state: FSMContext):
     except:
         await message.answer(f"❌ Введите число от 1 до {len(data['cities'])}")
 
-# -# ---------- Выдача баланса ----------
+# ---------- Новая логика выдачи баланса ----------
 @dp.message(F.text == "💰 Выдать баланс")
 async def add_balance_start(message: types.Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
-    await message.answer("Введите ID пользователя и сумму через пробел:\nПример: <code>613790427 5000</code>", parse_mode="HTML", reply_markup=back_to_admin_kb())
+    await message.answer(
+        "Выберите валюту для выдачи:",
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="KZT")],
+                [KeyboardButton(text="USDT")],
+                [KeyboardButton(text="BTC")],
+                [KeyboardButton(text="LTC")],
+                [KeyboardButton(text="🔙 Назад в админку")]
+            ],
+            resize_keyboard=True
+        )
+    )
+    await state.set_state(AdminStates.bal_currency)
+
+@dp.message(AdminStates.bal_currency)
+async def add_balance_currency(message: types.Message, state: FSMContext):
+    if message.text == "🔙 Назад в админку":
+        await state.clear()
+        await back_to_admin(message, state)
+        return
+    currency = message.text.upper()
+    if currency not in ["KZT", "USDT", "BTC", "LTC"]:
+        await message.answer("❌ Выберите валюту из списка: KZT, USDT, BTC, LTC")
+        return
+    await state.update_data(currency=currency)
+    await message.answer(
+        f"Введите ID пользователя и сумму через пробел:\nПример: `613790427 5000`",
+        parse_mode="Markdown",
+        reply_markup=back_to_admin_kb()
+    )
     await state.set_state(AdminStates.bal_user)
 
 @dp.message(AdminStates.bal_user)
@@ -516,27 +561,41 @@ async def add_balance_user(message: types.Message, state: FSMContext):
         await back_to_admin(message, state)
         return
     parts = message.text.strip().split()
-    if len(parts) != 2 or not parts[1].isdigit():
+    if len(parts) != 2 or not parts[1].replace('.', '').isdigit():
         await message.answer("❌ Формат: <code>ID СУММА</code>", parse_mode="HTML")
         return
     user_id = parts[0]
-    amount = int(parts[1])
+    amount = float(parts[1].replace(',', '.'))
+    data_state = await state.get_data()
+    currency = data_state["currency"]
     if user_id not in data["users"]:
         data["users"][user_id] = {
-            "balance": 0,
+            "internal_id": data["next_user_internal_id"],
+            "balance_kzt": 0,
+            "balance_usdt": 0.0,
+            "balance_btc": 0.0,
+            "balance_ltc": 0.0,
             "orders": [],
             "joined": datetime.now().isoformat()
         }
-    data["users"][user_id]["balance"] += amount
+        data["next_user_internal_id"] += 1
+    if currency == "KZT":
+        data["users"][user_id]["balance_kzt"] += int(amount)
+    elif currency == "USDT":
+        data["users"][user_id]["balance_usdt"] += amount
+    elif currency == "BTC":
+        data["users"][user_id]["balance_btc"] += amount
+    elif currency == "LTC":
+        data["users"][user_id]["balance_ltc"] += amount
     save_data(data)
     await state.clear()
-    await message.answer(f"✅ Пользователю <code>{user_id}</code> начислено {amount} KZT.", parse_mode="HTML", reply_markup=admin_menu())
+    await message.answer(f"✅ Пользователю <code>{user_id}</code> начислено {amount} {currency}.", parse_mode="HTML", reply_markup=admin_menu())
     try:
-        await bot.send_message(int(user_id), f"💰 Ваш баланс пополнен на <b>{amount} KZT</b>!", parse_mode="HTML")
+        await bot.send_message(int(user_id), f"💰 Ваш баланс пополнен на <b>{amount} {currency}</b>!", parse_mode="HTML")
     except:
         pass
 
-# ---------- Рассылка ----------
+# ---------- Остальные админ-команды (рассылка, статистика) ----------
 @dp.message(F.text == "📢 Рассылка")
 async def broadcast_start(message: types.Message, state: FSMContext):
     if not is_admin(message.from_user.id):
@@ -561,7 +620,6 @@ async def broadcast_send(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer(f"✅ Рассылка отправлена {count} пользователям.", reply_markup=admin_menu())
 
-# ---------- Статистика ----------
 @dp.message(F.text == "📊 Статистика")
 async def admin_stats(message: types.Message):
     if not is_admin(message.from_user.id):
@@ -569,13 +627,20 @@ async def admin_stats(message: types.Message):
     total_users = len(data["users"])
     total_orders = len(data["orders"])
     total_revenue = sum(o.get("price", 0) for o in data["orders"])
-    total_balance = sum(u["balance"] for u in data["users"].values())
+    total_balance_kzt = sum(u["balance_kzt"] for u in data["users"].values())
+    total_balance_usdt = sum(u["balance_usdt"] for u in data["users"].values())
+    total_balance_btc = sum(u["balance_btc"] for u in data["users"].values())
+    total_balance_ltc = sum(u["balance_ltc"] for u in data["users"].values())
     text = (
         f"📊 <b>Статистика</b>\n\n"
         f"👥 Пользователей: {total_users}\n"
         f"🛍️ Заказов: {total_orders}\n"
         f"💰 Выручка: {total_revenue} KZT\n"
-        f"💎 Общий баланс: {total_balance} KZT\n"
+        f"💎 Общий баланс:\n"
+        f"KZT: {total_balance_kzt}\n"
+        f"USDT: {total_balance_usdt:.2f}\n"
+        f"BTC: {total_balance_btc:.6f}\n"
+        f"LTC: {total_balance_ltc:.4f}\n"
         f"📦 Товаров: {len(data['products'])}\n"
         f"🏙 Городов: {len(data['cities'])}"
     )
@@ -588,3 +653,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+    
